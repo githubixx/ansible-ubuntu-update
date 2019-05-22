@@ -1,0 +1,111 @@
+---
+- hosts: assets:k8s_controller:k8s_worker
+  serial: "{{ num_serial|default(1) }}"
+  tasks:
+    - name: apt-get update
+      apt:
+        update-cache: yes
+      changed_when: 0
+
+    - name: Get packages to unhold
+      command: apt-mark showhold
+      register: packages_holded
+      changed_when: 0
+
+    - name: Parse apt-mark unhold output to get list of holded packages
+      set_fact:
+        packages_to_unhold: '{{ packages_holded.stdout_lines | list | sort }}'
+      changed_when: 0
+
+    - name: Unhold packages
+      command: "apt-mark unhold {{ item }}"
+      with_items:
+        - "{{ packages_to_unhold }}"
+      when: packages_holded is defined
+
+    - name: Ensure kernel
+      apt:
+        name: ['linux-headers-{{ kernel_version }}-generic', 'linux-image-{{ kernel_version }}-generic', 'linux-modules-{{ kernel_version }}-generic']
+        state: present
+      when: kernel_version is defined
+
+    - name: Get list of pending upgrades
+      command: apt-get --simulate dist-upgrade
+      args:
+        warn: false # don't warn us about apt having its own plugin
+      register: apt_simulate
+      changed_when: 0
+
+    - name: Parse apt-get output to get list of changed packages
+      set_fact:
+        updates: '{{ apt_simulate.stdout_lines | select("match", "^Inst ") | list | sort }}'
+      changed_when: 0
+
+    - name: Show pending updates
+      debug:
+        var: updates
+      when: updates.0 is defined
+
+    - name: Confirm to proceed
+      pause:
+      when: updates.0 is defined
+
+    - name: apt-get autoremove
+      command: apt-get -y autoremove
+      args:
+        warn: false
+      when: '"Inst linux-image-" in apt_simulate.stdout'
+      changed_when: 0
+
+    - name: Run apt-get dist-upgrade
+      apt:
+        upgrade: dist # upgrade all packages to latest version
+
+    - name: Reinstall packages if requested
+      command: "apt-get -y install --reinstall {{ item }}"
+      args:
+        warn: false
+      with_items:
+        - "{{ packages_to_reinstall }}"
+      when: packages_to_reinstall is defined
+
+    - name: Hold kernel packages if requested
+      command: "apt-mark hold {{ item }}"
+      with_items:
+        - linux-headers-{{ kernel_version }}-generic
+        - linux-image-{{ kernel_version }}-generic
+        - linux-modules-{{ kernel_version }}-generic
+      when: kernel_packages_hold is defined and kernel_version is defined
+
+    - name: Hold further packages if requested
+      command: "apt-mark hold {{ item }}"
+      with_items:
+        - "{{ packages_to_hold }}"
+      when: packages_to_hold is defined
+
+    - name: Check if reboot needed
+      stat: path=/var/run/reboot-required
+      register: file_reboot_required
+
+    - meta: end_play
+      when: not file_reboot_required.stat.exists
+
+    - name: Reboot node
+      shell: sleep 2 && shutdown -r now "Reboot triggered by ansible"
+      async: 1
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait for node to finish booting
+      become: false
+      delegate_to: localhost
+      wait_for:
+        host={{ ansible_host }}
+        port={{ ansible_port }}
+        state=started
+        delay=5
+        timeout=600
+
+    - name: Wait for ssh to start fully
+      pause:
+        seconds: 15
