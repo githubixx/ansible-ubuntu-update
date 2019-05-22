@@ -1,6 +1,6 @@
 ---
-- hosts: assets
-
+- hosts: assets:k8s_controller:k8s_worker
+  serial: "{{ num_serial|default(1) }}"
   tasks:
     - name: apt-get update
       apt:
@@ -27,6 +27,7 @@
       apt:
         name: ['linux-headers-{{ kernel_version }}-generic', 'linux-image-{{ kernel_version }}-generic', 'linux-modules-{{ kernel_version }}-generic']
         state: present
+      when: kernel_version is defined
 
     - name: Get list of pending upgrades
       command: apt-get --simulate dist-upgrade
@@ -56,23 +57,9 @@
       when: '"Inst linux-image-" in apt_simulate.stdout'
       changed_when: 0
 
-    - name: apt-get dist-upgrade
+    - name: Run apt-get dist-upgrade
       apt:
         upgrade: dist # upgrade all packages to latest version
-
-    - name: Hold kernel packages if requested
-      command: "apt-mark hold {{ item }}"
-      with_items:
-        - linux-headers-{{ kernel_version }}-generic
-        - linux-image-{{ kernel_version }}-generic
-        - linux-modules-{{ kernel_version }}-generic
-      when: kernel_packages_hold is defined
-
-    - name: Hold further packages if requested
-      command: "apt-mark hold {{ item }}"
-      with_items:
-        - "{{ packages_to_hold }}"
-      when: packages_to_hold is defined
 
     - name: Reinstall packages if requested
       command: "apt-get -y install --reinstall {{ item }}"
@@ -82,20 +69,34 @@
         - "{{ packages_to_reinstall }}"
       when: packages_to_reinstall is defined
 
-    - name: check if reboot needed
+    - name: Hold kernel packages if requested
+      command: "apt-mark hold {{ item }}"
+      with_items:
+        - linux-headers-{{ kernel_version }}-generic
+        - linux-image-{{ kernel_version }}-generic
+        - linux-modules-{{ kernel_version }}-generic
+      when: kernel_packages_hold is defined and kernel_version is defined
+
+    - name: Hold further packages if requested
+      command: "apt-mark hold {{ item }}"
+      with_items:
+        - "{{ packages_to_hold }}"
+      when: packages_to_hold is defined
+
+    - name: Check if reboot needed
       stat: path=/var/run/reboot-required
       register: file_reboot_required
 
     - meta: end_play
       when: not file_reboot_required.stat.exists
 
-    - name: reboot node
+    - name: Reboot node
       shell: sleep 2 && shutdown -r now "Reboot triggered by ansible"
       async: 1
       poll: 0
       ignore_errors: true
 
-    - name: wait for node to finish booting
+    - name: Wait for node to finish booting
       become: false
       delegate_to: localhost
       wait_for:
@@ -105,6 +106,6 @@
         delay=5
         timeout=600
 
-    - name: wait for ssh to start fully
+    - name: Wait for ssh to start fully
       pause:
         seconds: 15
